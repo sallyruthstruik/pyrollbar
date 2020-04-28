@@ -23,7 +23,7 @@ import requests
 import six
 
 from rollbar.lib import events, filters, dict_merge, parse_qs, text, transport, urljoin, iteritems, defaultJSONEncode
-
+from rollbar.sampling import maybe_throttle_error, maybe_throttle_message
 
 __version__ = '0.15.0'
 __log_name__ = 'rollbar'
@@ -268,6 +268,13 @@ SETTINGS = {
     'request_pool_connections': None,
     'request_pool_maxsize': None,
     'request_max_retries': None,
+
+    'max_threads_num': 1000,
+
+    # Reporting frequency.
+    'error_report_min_interval_seconds': None,
+    'message_report_min_interval_seconds': None,
+    'gc_interval_seconds': 3600,   # clear in-memory data each hour
 }
 
 _CURRENT_LAMBDA_CONTEXT = None
@@ -429,6 +436,11 @@ def report_exc_info(exc_info=None, request=None, extra_data=None, payload_data=N
     if exc_info is None:
         exc_info = sys.exc_info()
 
+    if maybe_throttle_error(exc_info):
+        log.info('exception throttled because of '
+                 'error_report_min_interval_seconds setting: %r', exc_info[1])
+        return
+
     try:
         return _report_exc_info(exc_info, request, extra_data, payload_data, level=level)
     except Exception as e:
@@ -445,6 +457,11 @@ def report_message(message, level='error', request=None, extra_data=None, payloa
     extra_data: dictionary of params to include with the message. 'body' is reserved.
     payload_data: param names to pass in the 'data' level of the payload; overrides defaults.
     """
+    if maybe_throttle_message(message):
+        log.info('message throttled because of '
+                 'message_report_min_interval_seconds setting: %r', message)
+        return
+
     try:
         return _report_message(message, level, request, extra_data, payload_data)
     except Exception as e:
@@ -804,6 +821,14 @@ def _check_config():
     if not SETTINGS.get('access_token'):
         log.warning("pyrollbar: No access_token provided. Please configure by calling rollbar.init() with your access token.")
         return False
+
+    max_thread_num = SETTINGS.get('max_threads_num')
+    if max_thread_num:
+        current_threads = _threads.qsize()
+        if current_threads >= max_thread_num:
+            log.warning("pyrollbar: too many active threads: %s for limit %s",
+                        current_threads, max_thread_num)
+            return False
 
     return True
 
